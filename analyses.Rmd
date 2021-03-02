@@ -1,0 +1,1188 @@
+---
+title: "Analyses"
+output: html_document
+---
+
+# Overview of primary statistics in paper  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Source functions, load packages, define plot pars, load behavioral data  
+
+```{r}
+sf <- function() {
+  ### Handle to quickly source all functions ###
+  fps <- c( 
+    list.files("./Functions/Model/Optimize", full.names=TRUE),
+    list.files("./Functions/Model/Simulate", full.names=TRUE),
+    list.files("./Functions/Model/Recover_Params", full.names=TRUE),
+    list.files("./Functions/Analyze", full.names=TRUE),
+    list.files("./Functions/Model/General/", full.names=TRUE)
+  )
+  sapply(fps, source)
+}
+sf()
+```
+
+```{r, echo=FALSE}
+# Originals; see if this fixes residuals  
+sapply(c(
+         "dplyr", 
+         "tidyverse",
+         "patchwork",
+         "lme4",
+         "lmerTest",
+         "kableExtra",
+         "latex2exp",
+         "sjPlot",
+         "BayesFactor",
+         "psych",
+         "ggeffects"
+), require, character.only=TRUE)
+```
+
+```{r, echo=FALSE}
+DefPlotPars()
+```
+
+# Prep data for analysis  
+```{r}
+# Load 49-pt datasets including exclusions for full-trial df, manipulation checks, and RRS and BDI 
+bx_df <- read_csv("./../../data/bx_df_w_exclusions_removed.csv")
+mc_df <- read.csv("./../../data/manipulation_checks/MC_exclusions_removed.csv") # Tibble reads in incorrectly
+rrs_bdi <- read_csv("./../../data/clean_questionnaires/rrs_bdi_w_exclusions.csv")
+```
+
+```{r}
+# Some helpful analysis fxs  
+InvLogit <- function(x) exp(x)/(1 + exp(x))
+ZScore <- function(x) (x-mean(x))/sd(x)
+```
+
+Ensure factor vars are typed appropriately and set with the correct factor level.  
+```{r}
+bdf_factor_vars <- c("ID", "condition", "first_cond")
+bx_df[bdf_factor_vars] <- lapply(bx_df[bdf_factor_vars], as.factor)
+rrs_bdi$med_bdi <- ifelse(rrs_bdi$bdi_sum <= median(rrs_bdi$bdi_sum), "low_depr", "high_depr")
+rrs_bdi$med_rum <- ifelse(rrs_bdi$rrs_sum < median(rrs_bdi$rrs_sum), "low_rrs", "high_rrs")
+```
+
+```{r}
+# Give these more intuitive names.. 
+levels(bx_df$condition)[levels(bx_df$condition)=="D"] <- "NEU"
+levels(bx_df$condition)[levels(bx_df$condition)=="I"] <- "RUM"
+# .. and make sure NEU is the reference level 
+bx_df$condition <- factor(bx_df$condition, levels=c("NEU", "RUM"))
+# Same with which condition came first 
+levels(bx_df$first_cond)[levels(bx_df$first_cond)=="D"] <- "NEU"
+levels(bx_df$first_cond)[levels(bx_df$first_cond)=="I"] <- "RUM"
+bx_df$first_cond <- factor(bx_df$first_cond, levels=c("NEU", "RUM"))
+```
+
+```{r}
+## Z score the between-subject vars  
+rrs_bdi$bdi_sum_z <- ZScore(rrs_bdi$bdi_sum)
+rrs_bdi$rrs_brood_z <- ZScore(rrs_bdi$rrs_brood_sum)
+rrs_bdi$rrs_refl_z <- ZScore(rrs_bdi$rrs_reflect_sum)
+rrs_bdi$rrs_sum_z <- ZScore(rrs_bdi$rrs_sum)
+```
+
+Summary and tabular data for RRS and BDI  
+```{r}
+rrs_bdi %>% summarize(mean(bdi_sum), sd(bdi_sum))
+rrs_bdi %>% summarize(mean(rrs_sum), sd(rrs_sum), mean(rrs_brood_sum), sd(rrs_brood_sum), mean(rrs_reflect_sum), sd(rrs_reflect_sum)) 
+length(which(rrs_bdi$bdi_sum < 20))
+length(which(rrs_bdi$bdi_sum < 20))/length(rrs_bdi$bdi_sum)
+length(which(rrs_bdi$bdi_sum > 19 & rrs_bdi$bdi_sum < 29))
+length(which(rrs_bdi$bdi_sum > 19 & rrs_bdi$bdi_sum < 29))/length(rrs_bdi$bdi_sum)
+length(which(rrs_bdi$bdi_sum > 28))
+length(which(rrs_bdi$bdi_sum > 28))/length(rrs_bdi$bdi_sum)
+# Double check
+#sum(length(which(rrs_bdi$bdi_sum < 20))/length(rrs_bdi$bdi_sum), length(which(rrs_bdi$bdi_sum > 19 & rrs_bdi$bdi_sum < 29))/length(rrs_bdi$bdi_sum), length(which(rrs_bdi$bdi_sum > 28))/length(rrs_bdi$bdi_sum))
+```
+
+
+```{r}
+cor.test(rrs_bdi$bdi_sum, rrs_bdi$rrs_brood_sum)
+cor.test(rrs_bdi$bdi_sum, rrs_bdi$rrs_reflect_sum)
+```
+
+
+# Plan  
+This was a within-subject manipulation study where participants received rumination (RUM) and neutral (NEU) manipulations, with order counterbalanced, while performing a learning task. We also analyzed the effects of *trait* rumination, a between-subject variable. The primary outcomes are performance on the learning task and latent parameters derived from computational models of the task.  
+
+Analyses will proceed in 3 parts.  
+
+1. Manipulation checks (did participants in the rumination condition report *state* increases in variables that would be expected to rise if ruminating [a within-subject variable]?) 
+2. Behavioral effects  
+3. Effects from computational modeling  
+
+# 1. Manipulation checks  
+
+We expected RUM (vs. NEU) would increase self-referential thinking and negative affect and decrease positive affect. To assess this, we had participants provide ratings of these variables at baseline and at the middle and endpoints of each RUM and NEU phase. We took the composite of these variables, with positive affect reverse scored, as indexing the effectiveness of the manipulation.  
+
+## Prep for regression  
+
+```{r}
+# Create a df prepped for regression 
+mc_fr <- mc_df
+levels(mc_fr$condition)[levels(mc_fr$condition)=="D"] <- "NEU"
+levels(mc_fr$condition)[levels(mc_fr$condition)=="I"] <- "RUM"
+mc_fr$condition <- factor(mc_fr$condition, levels=c("NEU", "RUM"))
+levels(mc_fr$first_cond)[levels(mc_fr$first_cond)=="D"] <- "NEU"
+levels(mc_fr$first_cond)[levels(mc_fr$first_cond)=="I"] <- "RUM"
+mc_fr$first_cond <- factor(mc_fr$first_cond, levels=c("NEU", "RUM"))
+```
+
+
+```{r}
+# Higher scores on these items mean *improved* affect, thus these need to be reverse scored to create a composite manip effectiveness score
+pos_aff_items <- c("joyful", "content", "happy") 
+# Reverse code the positive affect items, so that for all items higher score means worse affect..
+mc_fr[mc_fr$mc_name %in% pos_aff_items, ]$score <- 
+   9 - mc_fr[mc_fr$mc_name %in% pos_aff_items, ]$score + 1
+# .. and label these with reverse to make sure it's clear they're reversed 
+mc_fr$mc_name <- as.character(mc_fr$mc_name)
+mc_fr[mc_fr$mc_name %in% pos_aff_items, ]$mc_name <- 
+  paste0("rev_", mc_fr[mc_fr$mc_name %in% pos_aff_items, ]$mc_name)
+```
+
+Group summarize the manipulation check summary score. The score rises in the rumination condition very slightly whereas it's  flat in the neutral condition; the difference is very small.  
+
+```{r}
+# Flat in the NEU and ticks up slightly in RUM  
+mc_fr %>% group_by(condition, time_point) %>% summarize(m=mean(score))
+```
+
+```{r}
+CreateShortMCDf <- function(the_mc_df) {
+  ### Create wide df to allow for appropriate regression + type vars appropriately ###
+  # Take composite score at the midpoints and append the baseline score 
+  mc_fr_short <- 
+    data.frame(the_mc_df %>% filter(time_point %in% c(2:3)) %>% 
+    group_by(ID, condition, mc_name, first_cond) %>% summarize(post_manip_score=mean(score)))
+  
+  baseline <- 
+    data.frame(the_mc_df %>% filter(time_point == 1) %>% 
+    group_by(ID, condition, mc_name, first_cond) %>% summarize(base_score=mean(score)))
+  
+  if (all(mc_fr_short$mc_name == baseline$mc_name & all(mc_fr_short$ID == baseline$ID))) {
+    mc_fr_short$base_score <- baseline$base_score
+  }
+  mc_fr_short$base_sc_z <- ZScore(mc_fr_short$base_score)
+  mc_fr_short$mc_item <- as.factor(mc_fr_short$mc_name) # Type as underordered factor 
+mc_fr_short  
+}
+#scale(mc_fr_short %>% filter(mc_name=="angry") %>% select(base_score))
+```
+
+```{r}
+mc_fr_short <- CreateShortMCDf(mc_fr)
+```
+
+```{r}
+# Z score every baseline item within-item, so that we have the appropriate value to use 
+# for item REs in mixed-effects models 
+mc_fr_short$base_by_item_z <- rep(NA, nrow(mc_fr_short))
+for (item in as.character(unique(mc_fr_short$mc_item))) {
+  mc_fr_short[mc_fr_short$mc_item==item, "base_by_item_z"] <- 
+   ZScore(mc_fr_short[mc_fr_short$mc_item==item, "base_score"])
+}
+# Spot checks 
+# mc_fr_short[mc_fr_short$mc_item=="rev_joyful", "base_score"]
+# mc_fr_short[mc_fr_short$mc_item=="rev_joyful", "base_by_item_z"]
+# mc_fr_short[mc_fr_short$mc_item=="angry", "base_score"]
+# mc_fr_short[mc_fr_short$mc_item=="angry", "base_by_item_z"]
+# mc_fr_short[mc_fr_short$mc_item=="sad", "base_score"]
+# mc_fr_short[mc_fr_short$mc_item=="sad", "base_by_item_z"]
+```
+
+The dataframe looks like this. From each participant, we have a baseline and post-manipulation score on 9 manipulation check items, in each RUM and NEU conditions. Higher score means higher on variables expected to rise with rumination. Thus we examined if post-manipulation score is higher in RUM than NEU, controlling for baseline scores. 
+
+```{r}
+mc_fr_short %>% head(20)
+```
+
+Get Cronbach's alpha. (8/8/20 confirmed again this was coded correctly in clean data)
+```{r}
+base_wide <- data.frame(spread(mc_fr_short %>% 
+                                 group_by(ID, mc_name) %>% 
+                                 summarize(m=mean(base_score)), mc_name, m))
+alpha(base_wide %>% select(-ID))
+```
+
+
+```{r}
+post_wide <- data.frame(spread(mc_fr_short %>% group_by(ID, mc_name) %>% summarize(m=mean(post_manip_score)), mc_name, m))
+alpha(post_wide %>% select(-ID))
+```
+
+The summary score did not differ at baseline.  
+```{r}
+m_base <- mc_fr_short %>% group_by(ID, condition) %>%  
+        summarize(m_base=mean(base_score))
+
+m_base %>% group_by(condition) %>% summarize(m=mean(m_base), sd=sd(m_base))
+
+t.test(as.numeric(unlist(
+  mc_fr_short %>% group_by(ID) %>% filter(condition=="NEU") %>% 
+    summarize(m_base=mean(base_score)) %>% select(m_base))),
+as.numeric(unlist(
+  mc_fr_short %>% group_by(ID) %>% filter(condition=="RUM") %>% 
+    summarize(m_base=mean(base_score)) %>% select(m_base))), paired=TRUE)
+
+1/ttestBF(as.numeric(unlist(
+  mc_fr_short %>% group_by(ID) %>% filter(condition=="NEU") %>% 
+    summarize(m_base=mean(base_score)) %>% select(m_base))),
+as.numeric(unlist(
+  mc_fr_short %>% group_by(ID) %>% filter(condition=="RUM") %>% 
+    summarize(m_base=mean(base_score)) %>% select(m_base))), paired=TRUE)
+```
+
+```{r}
+m_post <- mc_fr_short %>% group_by(ID, condition) %>%  
+        summarize(m_p=mean(post_manip_score))
+
+m_post %>% group_by(condition) %>% summarize(m=mean(m_p), sd=sd(m_p))
+```
+
+This regresses the composite manipulation effectiveness score at the 2 time points after the manipulations began on condition, controlling for baseline score and condition order. Thus it asks if the score on these manipulation check items was higher in the rumination than neutral condition. First_cond is a between-subjects covariate of condition order ie. whether they received rumination or neutral first.  
+
+### Model selection  
+
+Maximal model 
+```{r}
+mc_fit_1 <- lmer(post_manip_score ~ 
+                 condition + base_sc_z + first_cond + 
+                 (base_sc_z + condition |ID) +
+                 (base_by_item_z + condition|mc_item),
+                 data=mc_fr_short, control=lmerControl(optimizer = "bobyqa"))
+
+summary(mc_fit_1)
+```
+
+Now testing some conceptually sensible simplifiactions...
+
+Removing item level completely 
+```{r}
+mc_fit_2 <- lmer(post_manip_score ~ 
+                 condition + base_sc_z + first_cond + 
+                 (condition + base_sc_z |ID),
+                 # Remove item level completely 
+                 data=mc_fr_short, control=lmerControl(optimizer = "bobyqa"))
+summary(mc_fit_2)
+```
+
+Favors inclusion of the item-level effects  
+```{r}
+anova(mc_fit_2, mc_fit_1)
+```
+
+```{r}
+mc_fit_3 <- lmer(post_manip_score ~ 
+                 condition + base_sc_z + first_cond + 
+                 (condition + base_sc_z |ID) +
+                 (1|mc_item), # Just random intercepts for item 
+                 data=mc_fr_short, control=lmerControl(optimizer = "bobyqa"))
+summary(mc_fit_3)
+```
+
+Favors the inclusion of slopes  
+```{r}
+anova(mc_fit_1, mc_fit_3)
+```
+
+```{r}
+mc_fit_4 <- lmer(post_manip_score ~ 
+                 condition + base_sc_z + first_cond + 
+                 (1 |ID) + # Just random intercepts for subject 
+                 (condition + base_sc_z|mc_item), 
+                 data=mc_fr_short, control=lmerControl(optimizer = "bobyqa"))
+summary(mc_fit_4)
+```
+
+Again favors random slopes 
+```{r}
+anova(mc_fit_1, mc_fit_4)
+```
+
+VIF is fine 
+```{r}
+car::vif(mc_fit_1)
+```
+
+Inspection of the condition random effect (condition RUM) shows some evidence of a pattern, such that the manipulation check items that do not move in the expected direction are mostly positive affect items--in fact, these mostly move in the opposite as expected direction (eg. a decrease in reverse happiness means relatively *higher* happiness in the rumination than neutral condition).  
+
+```{r}
+item_REs <- ranef(mc_fit_1)[["mc_item"]]
+item_REs <- data.frame("item"=rownames(item_REs), item_REs)
+item_REs %>% arrange(-conditionRUM) 
+```
+
+# 2. Behavioral effects  
+
+## Cronbach's alpha of rumination and bdi   
+
+Spot check again raw data 12.13: 2, 3, 9, 16, 20, 21, 26, 32 (31 in raw file due to recording doc'd in clean_data), 38, 51 (15 in in-person due to entry error), 42, 45, 52, 57. So there doesn't seem to be anything wrong with entry and reconfirmed the qs match up correctly.  
+
+The summed variables don't seem to have much restriction of range compared to eg. Treynor et al. p. 253  
+
+```{r}
+psych::alpha(rrs_bdi %>% select(contains("rrs_reflect")) %>% select(-c(rrs_reflect_sum)))
+mean(rowSums(rrs_bdi %>% select(contains("rrs_reflect")) %>% select(-c(rrs_reflect_sum))))
+sd(rowSums(rrs_bdi %>% select(contains("rrs_reflect")) %>% select(-c(rrs_reflect_sum))))
+
+psych::alpha(rrs_bdi %>% select(contains("rrs_brood")) %>% select(-c(rrs_brood_sum, rrs_brood_z)))
+mean(rowSums(rrs_bdi %>% select(contains("rrs_brood")) %>% select(-c(rrs_brood_sum, rrs_brood_z))))
+sd(rowSums(rrs_bdi %>% select(contains("rrs_brood")) %>% select(-c(rrs_brood_sum, rrs_brood_z))))
+```
+
+```{r}
+psych::alpha(rrs_bdi %>% select(contains("bdi")) %>% select(-c(bdi_sum, med_bdi, bdi_sum_z)))
+```
+
+## Behavioral results  
+
+We expected RUM (vs. NEU) would impair performance on the learning task, reflected in a lower proportion correct. The results are consistent with this, albeit with heterogeneity in the effect, with only 61.22% performing better in RUM than NEU.  
+
+For trait rumination, it wasn't clear what to expect, because high trait ruminators sometimes do *better* at certain tasks, but worse in others. The results suggest no stat. significant relationship between trait rumination and performance.  
+
+I'll first graph the results then show the statistics.  
+
+```{r}
+# For plotting chance performance 
+chance_gg <- geom_hline(yintercept=1/3) 
+```
+
+```{r}
+summs <- data.frame(bx_df %>% group_by(condition) %>% summarize(m=mean(correct), n=n()))
+summs
+summs_by_id <- bx_df %>% group_by(condition, ID) %>% summarize(pcor=mean(correct), n=n())
+rum_summs <- summs_by_id %>% filter(condition=="RUM")
+neu_summs <- summs_by_id %>% filter(condition=="NEU")
+
+summs[summs$condition=="RUM", "pcor_sd"] <- sd(rum_summs$pcor)
+summs[summs$condition=="NEU", "pcor_sd"] <- sd(neu_summs$pcor)
+summs[summs$condition=="RUM", "se"] <- sd(rum_summs$pcor)/sqrt(nrow(rum_summs))
+summs[summs$condition=="NEU", "se"] <- sd(neu_summs$pcor)/sqrt(nrow(neu_summs))
+# Cohen's d terms
+summs[summs$condition=="NEU", "sp_num_terms"] <- sd(neu_summs$pcor)^2 * (nrow(neu_summs)-1)
+summs[summs$condition=="RUM", "sp_num_terms"] <- sd(rum_summs$pcor)^2 * (nrow(rum_summs)-1)
+
+# Code if the pt performed better in NEU than RUM 
+if (all(rum_summs$ID == neu_summs$ID)) {
+  diffs <- rum_summs$pcor - neu_summs$pcor
+  diffs_df <- data.frame(rum_summs$ID, diffs)
+}
+worse_rum <- ifelse(diffs < 0, 1, 0)  
+# Put in for plotting  
+summs_by_id$worse_rum <- as.factor(rep(worse_rum, 2))
+summs_by_id %>% group_by(condition) %>% summarize(sd(pcor))
+#summs_by_id %>% group_by(condition) %>% summarize(mean(pcor)) # Check this matches up 
+```
+
+```{r}
+a <- 
+  ggplot(summs_by_id, aes(x=condition, y=pcor, group=ID)) +
+  geom_jitter(width=.03, alpha=.5, color="black", fill="gray57", pch=21) +
+  geom_line(aes(color=worse_rum), size=1, alpha=.4) + 
+  geom_errorbar(data=summs, aes(x=condition, 
+                                ymin=m-se, ymax=m+se), inherit.aes=FALSE, size=1.5, width=.1) +
+  geom_point(data=summs, aes(x=condition, y=m), inherit.aes = FALSE, 
+             fill="blue", color="black", pch=21, size=3) + 
+  ga + ap + lp + 
+  ylab("proportion correct") + xlab("") + 
+  geom_hline(yintercept=1/3) +
+  ylim(c(.30, .76)) +
+  scale_color_manual(labels=c("better RUM", "better NEU"), values=c("purple", "orange")) +
+  ggtitle("Induced rumination \n (within subject)") +
+  theme(plot.title = element_text(size=20, hjust=.5)) + 
+  geom_text(x=1.5, y=.76, size=9, label="*") + 
+    theme(legend.text = element_text(size = 18),
+               legend.title = element_blank(),
+               legend.key.size = unit(2, 'lines'))
+```
+
+```{r}
+# Merge proportion correct and rumination 
+summs_id_no_c <- bx_df %>% group_by(ID) %>% summarize(pcor=mean(correct))
+if (all(summs_id_no_c$ID == rrs_bdi$ID)) summs_id_no_c$rrs_sum <- rrs_bdi$rrs_sum 
+```
+
+```{r}
+b <- 
+  ggplot(summs_id_no_c, aes(x=rrs_sum, y=pcor)) + 
+    geom_smooth(color="black", method="lm", size=3, se=FALSE) + 
+    geom_point(size=6, color="black", fill="gray57", pch=21) + 
+    ga + ap + ylab("proportion correct") + xlab("trait rumination") + 
+    theme(axis.text.x = element_text(hjust=0)) +
+    ggtitle("Trait rumination \n (between subject)") +
+    theme(plot.title = element_text(size=20, vjust=.7, hjust=.5)) +
+    geom_text(x=29.1, y=.7, size=9, label="ns") 
+```
+
+```{r, fig.height=9, fig.width=8}
+behavior_fig <- a / b + plot_annotation(tag_levels = 'A') &  theme(plot.tag = element_text(size = 20))# & theme(plot.tag = element_text(size=40)))
+behavior_fig
+#ggsave("HitchcockFig2.pdf", dpi=1500, plot=behavior_fig, height=12, width=8, path="./../../paper/figs/")
+```
+
+
+**Induced rumination and trait rumination effects**  
+
+Despite the heterogenous effect of the manipulation induction, with only 61% of participants performing worse in this condition, the condition difference in proportion correct is significant, with a small effect size by common guidelines.  
+
+```{r}
+# Paired cohen's d
+# Goulet-Pelletier, J. C., & Cousineau, D. (2018). A review of effect sizes and their confidence intervals, part I: The Cohen's d family. The Quantitative Methods for Psychology, 14(4), 242-265.
+S_p = sqrt((summs$sp_num_terms[1] +  summs$sp_num_terms[2]) / (nrow(summs_by_id)-2))
+d_p = (summs$m[1] - summs$m[2]) / S_p
+```
+
+
+```{r}
+# Proportion worse in rum 
+as.numeric(table(worse_rum)[2]/sum(table(worse_rum)))
+t.test(pcor ~ condition, data=summs_by_id, paired=TRUE)
+# Display cohen's d
+d_p 
+```
+
+That result was from a paired t-test on proportion correct (0-1) for each subject. I confirmed the result with a mixed effects model on the trial-wise data that also included a trait rumination covariate. 
+
+```{r}
+AddVars <- function(x) {
+  ### Add z-scored questionnaires and median scores to one subject's perf df ###
+  new_items <- rrs_bdi %>% filter(ID == unique(x$ID)) %>% 
+    select(bdi_z=bdi_sum_z,
+           rum_z=rrs_sum_z,
+           rum_refl_z=rrs_refl_z,
+           rum_brood_z=rrs_brood_z,
+           med_bdi,
+           med_rum)
+  rum_z <- rrs_bdi %>% filter(ID == unique(x$ID)) %>% select(rum_z=rrs_sum_z)
+  rum_refl_z <- rrs_bdi %>% filter(ID == unique(x$ID)) %>% select(rum_refl_z=rrs_refl_z)
+  rum_brood_z <- rrs_bdi %>% filter(ID == unique(x$ID)) %>% select(rum_brood_z=rrs_brood_z)
+  x <- data.frame(x, new_items)
+x  
+}
+```
+
+```{r}
+bx_df <- bx_df %>% split(.$ID) %>% map_dfr(AddVars)
+```
+
+These data are in long form and the relevant variables look like this.  
+
+```{r}
+bx_df %>% select(ID, correct, condition, rum_z, bdi_z, game, tr_rsc, first_cond, phase_trial_rsc) %>% head(20)
+```
+
+The aim is to examine if performance (correct) differs by condition (RUM vs. NEU) and/or trait rumination (rum_z) while controlling for potential confounds. In the learning task, participants play a sequence of games with each game 30 trials long. Participants complete 22 games--660 trials--in each condition. Thus we have 1320 trials/participant. In addition to condition and rum_z, I included the following covariates:
+
+- trial_rsc is trial number in each game. Hence it controls for the effects of game time on task performance, because pts start each game at chance and then performance tends to rise over the game as they learn. I rescaled this variable from 0 to 1 so the estimate is more interpretable.  
+
+- phase_trial_rsc is trial number in each condition. Hence it controls for the effect of time spent in a condition eg. due to learning or fatigue. I rescaled this variable from 0 to 1 so the estimate is more interpretable.  
+
+- bdi_z is depression score  
+
+- first_cond is again which condition the participant did first (RUM or NEU)  
+
+The p-value for condition is around the same as in the t-test, whereas trait rumination does not impair performance (Figure 1B).  
+
+## Logisitic regressions  
+
+```{r}
+fit_corr_1 <- glmer(correct ~ 
+                    condition + rum_z + bdi_z + 
+                    first_cond + 
+                    phase_trial_rsc + tr_rsc +
+                    (condition + phase_trial_rsc + tr_rsc |ID), 
+                    family=binomial, data=bx_df, control=glmerControl(optimizer="bobyqa"))
+
+summary(fit_corr_1)
+```
+
+VIF are fine  
+```{r}
+car::vif(fit_corr_1)
+```
+
+### Model selection  
+
+Just condition slope, all others intercept 
+```{r}
+fit_corr_2 <- glmer(correct ~ 
+                    condition + rum_z + bdi_z + 
+                    first_cond + 
+                    phase_trial_rsc + tr_rsc +
+                    (condition|ID), 
+                    family=binomial, data=bx_df, control=glmerControl(optimizer="bobyqa"))
+
+summary(fit_corr_2)
+```
+
+Model selection favors the more complex model  
+```{r}
+anova(fit_corr_2, fit_corr_1)
+```
+Removing the condition RE    
+```{r}
+fit_corr_3 <- glmer(correct ~ 
+                    condition + rum_z + bdi_z + 
+                    first_cond + 
+                    phase_trial_rsc + tr_rsc +
+                    (phase_trial_rsc + tr_rsc|ID), 
+                    family=binomial, data=bx_df, control=glmerControl(optimizer="bobyqa"))
+
+summary(fit_corr_3)
+```
+
+Model selection again favors the more complex model  
+```{r}
+anova(fit_corr_3, fit_corr_1)
+```
+### Robustness checks  
+
+```{r}
+fit_corr_4 <- glmer(correct ~ 
+                    condition +
+                    (condition|ID), 
+                    family=binomial, data=bx_df, control=glmerControl(optimizer="bobyqa"))
+
+summary(fit_corr_4)
+```
+
+```{r}
+fit_corr_5 <- glmer(correct ~ 
+                    condition + rum_z +
+                    (condition|ID), 
+                    family=binomial, data=bx_df, control=glmerControl(optimizer="bobyqa"))
+
+summary(fit_corr_5)
+```
+
+```{r}
+if (all(rownames(ranef(mc_fit_1)[["ID"]])==rownames(ranef(fit_corr_1)[["ID"]]))) {
+ cor.test(ranef(mc_fit_1)[["ID"]]$conditionRUM, ranef(fit_corr_1)[["ID"]]$conditionRUM) 
+}
+# Sanity check that this is tracking differences by correlating with raw measure
+cor(ranef(fit_corr_1)[["ID"]]$conditionRUM, diffs)
+```
+
+
+### Moderation by depression severity    
+
+```{r}
+# Singular error, which is unsurprising bc there's only 2 condition + 1 BDI per subj 
+# fit_corr_dep <- glmer(correct ~ 
+#                     condition*bdi_z + + rum_z + 
+#                     first_cond + 
+#                     phase_trial_rsc + tr_rsc +
+#                     (condition*bdi_z + phase_trial_rsc + tr_rsc |ID), 
+#                     family=binomial, data=bx_df, control=glmerControl(optimizer="bobyqa"))
+# 
+# summary(fit_corr_dep)
+
+# Simplified by removing RE interaction (Matuschek et al 17)
+fit_corr_dep <- glmer(correct ~ 
+                      condition*bdi_z + + rum_z + 
+                      first_cond + 
+                      phase_trial_rsc + tr_rsc +
+                      (condition + phase_trial_rsc + tr_rsc |ID), 
+                      family=binomial, data=bx_df, control=glmerControl(optimizer="bobyqa"))
+
+summary(fit_corr_dep)
+```
+
+
+To test what's driving the interaction, splitting the dataset into those with high vs. low depression 
+```{r}
+# Use less than or equal to median to about evenly split pts   
+length(which(rrs_bdi$bdi_sum > median(rrs_bdi$bdi_sum)))
+length(which(rrs_bdi$bdi_sum <= median(rrs_bdi$bdi_sum)))
+# Confirm this subsetting works..
+unique(data.frame(bx_df %>% 
+                    filter(ID %in% as.numeric(unlist(rrs_bdi %>% filter(bdi_sum <= median(rrs_bdi$bdi_sum)) %>% select(ID)))))$ID)
+nrow(bx_df %>% 
+       filter(ID %in% as.numeric(unlist(rrs_bdi %>% filter(bdi_sum <= median(rrs_bdi$bdi_sum)) %>% select(ID)))))
+nrow(bx_df %>% 
+       filter(ID %in% as.numeric(unlist(rrs_bdi %>% filter(bdi_sum > median(rrs_bdi$bdi_sum)) %>% select(ID)))))
+# .. and subset
+bdf_lo <- bx_df %>% 
+  filter(ID %in% as.numeric(unlist(rrs_bdi %>% 
+                                     filter(bdi_sum <= median(rrs_bdi$bdi_sum)) %>% select(ID))))
+bdf_high <- bx_df %>% 
+  filter(ID %in% as.numeric(unlist(rrs_bdi %>% 
+                                     filter(bdi_sum > median(rrs_bdi$bdi_sum)) %>% select(ID))))
+```
+
+```{r}
+fit_corr_dep_lo <- glmer(correct ~ 
+                        condition + rum_z + bdi_z +
+                        first_cond + 
+                        phase_trial_rsc + tr_rsc +
+                        (condition + phase_trial_rsc + tr_rsc |ID), 
+                        family=binomial, data=bdf_lo, control=glmerControl(optimizer="bobyqa"))
+
+summary(fit_corr_dep_lo)
+```
+
+```{r}
+fit_corr_dep_hi <- glmer(correct ~ 
+                        condition + rum_z + bdi_z +
+                        first_cond + 
+                        phase_trial_rsc + tr_rsc +
+                        (condition + phase_trial_rsc + tr_rsc |ID), 
+                        family=binomial, data=bdf_high, control=glmerControl(optimizer="bobyqa"))
+
+summary(fit_corr_dep_hi)
+```
+
+Summarize performance difference 
+```{r}
+# Create NEU perf summary
+neu <- rbind(
+  data.frame(bdf_lo %>% group_by(ID) %>% filter(condition=="NEU") %>% 
+               summarize(m=mean(correct)), "cond"="low"),
+  data.frame(bdf_high %>% group_by(ID) %>% filter(condition=="NEU") %>% 
+               summarize(m=mean(correct)), "cond"="high"))
+
+t.test(m ~ cond, data=neu)
+cat("\n\n\n")
+ttestBF(as.numeric(unlist(neu %>% filter(cond=="low") %>% select(m))), 
+          as.numeric(unlist(neu %>% filter(cond=="high") %>% select(m))))
+
+neu %>% group_by(cond) %>% summarize(mean(m), sd(m))
+```
+
+
+```{r}
+# Create RUM perf summary
+rum <- rbind(
+  data.frame(bdf_lo %>% group_by(ID) %>% filter(condition=="RUM") %>% 
+               summarize(m=mean(correct)), "cond"="low"),
+  data.frame(bdf_high %>% group_by(ID) %>% filter(condition=="RUM") %>% 
+               summarize(m=mean(correct)), "cond"="high"))
+
+t.test(m ~ cond, data=rum)
+1/ttestBF(as.numeric(unlist(rum %>% filter(cond=="low") %>% select(m))), 
+          as.numeric(unlist(rum %>% filter(cond=="high") %>% select(m))))
+
+rum %>% group_by(cond) %>% summarize(mean(m), sd(m))
+```
+68% of those less-depressed performed worse in RUM whereas only 54% in high-depressed did, so this accounts for a bit of the heterogeneity of the effect but it is still notably heterogeneous in low   
+
+```{r}
+low_dep_IDs <- as.numeric(unlist(rrs_bdi %>% filter(bdi_sum <= median(rrs_bdi$bdi_sum)) %>% select(ID)))
+hi_dep_IDs <- as.numeric(unlist(rrs_bdi %>% filter(bdi_sum > median(rrs_bdi$bdi_sum)) %>% select(ID)))
+low_diffs <- diffs_df %>% filter(rum_summs.ID %in% low_dep_IDs)
+hi_diffs <- diffs_df %>% filter(rum_summs.ID %in% hi_dep_IDs)
+length(which(low_diffs$diffs < 0))/nrow(low_diffs)
+length(which(hi_diffs$diffs < 0))/nrow(hi_diffs)
+```
+
+
+# 3. Modeling results  
+
+## Model selction and validation  
+
+```{r}
+model_path <- "./../../model_res/opt_res/best_fits/batch1/" 
+```
+
+```{r}
+AddBICAndAIC <- function(model, fp_full, fp_split=0) {
+  ### Adds BIC to model df ### 
+  # Notes:
+  # All pts have 1320 trials: table(bx_df$ID) # 
+  # Some free parameters were fit on the full data with no conditional split, whereas others #
+  # were split by condition, each of which had 660 trials. Because there are two conditions, fp #
+  # split pars always include 2 free pars, par_NEU and par_RUM. Hence, fp_split should be entered #
+  # as the number of pars that were split by cond, then we multiply by 2 since these count as 2 pars # 
+  # Each of these pars is then split on cond # 
+  model$bic <- 2*model$nll + (fp_full*log(1320)) + (fp_split*2*log(660))
+  model$aic <- model$nll + fp_full + fp_split*2
+model  
+}
+PrintNestedModelBICSumms <- function(com, sim) {
+  ### Prints out some BIC comparisons for nested models #
+  # Args are complex and simpler model. Invoked only for side effect of printing, no return ###
+  if (ncol(com) <= ncol(sim)) stop("First arg needs to be the more complex model")
+  if (!all(com$ID == sim$ID)) stop("IDs are misaligned")
+  diffs <- com$bic - sim$bic
+  cat("\n Range of differences", range(diffs),
+      "\n Sum of differences", sum(diffs),
+      "\n Differences: \n \n", sort(diffs), "\n")
+  cat("\n Proportion of participants with improved BIC:", length(which(diffs < 0))/length(diffs))
+  print(ggplot(data.frame(diffs), aes(x=diffs)) + 
+    geom_histogram(color="black", fill="white", bins=50) + ga + ap +
+    ylab("") + xlab("Difference"))
+}
+```
+
+```{r}
+# fRL  
+r1 <- read.csv(paste0(model_path, "m_1_beta_eta__2817.csv"))
+r2 <- read.csv(paste0(model_path, "m_1_beta_eta__7056.csv"))
+r3 <- read.csv(paste0(model_path, "m_1_beta_eta__6245.csv"))
+# Sometimes terminating without reaching eps threshold, but above chance and other runs are converging and outputting same nll. 
+m1 <- GetBestFit(rbind(r1, r2))#, r3))
+m1_full <- GetBestFit(rbind(r1, r2, r3))
+m1 <- AddBICAndAIC(m1, fp_full=2)
+m1["model"] <- "fRL"
+# Adding LRTs 2.23 for direct comparison to mixed effects models
+# fRL + d 
+r1 <- read.csv(paste0(model_path, "m_2_beta_eta_d__1009.csv"))
+r2 <- read.csv(paste0(model_path, "m_2_beta_eta_d__9380.csv"))
+m2 <- GetBestFit(rbind(r1, r2))
+m2 <- AddBICAndAIC(m2, fp_full=3) # beta, eta, d
+length(which(round(pchisq(2*(-m2$nll - -m1$nll), df=1, lower.tail = FALSE), 2) < .05))/nrow(m2)
+m2["model"] <- "fRL+d"
+r1 <- read.csv(paste0(model_path, "m_2_beta_eta_d__5065.csv")) # Run before split labeling in fname
+r2 <- read.csv(paste0(model_path, "m_2_beta_eta_d__6012_split_on_beta.csv"))
+r3 <- read.csv(paste0(model_path, "m_2_beta_eta_d__5691_split_on_beta.csv"))
+m2_split_beta <- GetBestFit(rbind(r1, r2, r3))
+m2_split_beta <- AddBICAndAIC(m2_split_beta, fp_full=2, fp_split=1)
+m2_split_beta["model"] <- "fRL+d+split inv. temp."
+length(which(round(pchisq(2*(-m2_split_beta$nll - -m2$nll), df=1, lower.tail = FALSE), 2) < .05))/nrow(m2_split_beta) # .35
+#2*(-m2_split_beta$nll - -m2$nll)
+# fRL + d split on beta  
+r1 <- read.csv(paste0(model_path, "m_2_beta_eta_d__5374.csv")) # Run before split labeling in fname
+r2 <- read.csv(paste0(model_path, "m_2_beta_eta_d__4529.csv"))
+m2_split_eta <- GetBestFit(rbind(r1, r2))
+m2_split_eta <- AddBICAndAIC(m2_split_eta, fp_full=2, fp_split=1)
+m2_split_eta["model"] <- "fRL+d+split LR"
+length(which(round(pchisq(2*(-m2_split_eta$nll - -m2$nll), df=1, lower.tail = FALSE), 2) < .05))/nrow(m2_split_eta) # .27
+# frl + d split d  
+r1 <- read.csv(paste0(model_path, "m_2_beta_eta_d__7670.csv")) # Run before split labeling in fname
+r2 <- read.csv(paste0(model_path, "m_2_beta_eta_d__8713.csv"))
+m2_split_d <- GetBestFit(rbind(r1, r2))
+m2_split_d <- AddBICAndAIC(m2_split_d, fp_full=2, fp_split=1)
+m2_split_d["model"] <- "fRL+split d"
+length(which(round(pchisq(2*(-m2_split_d$nll - -m2$nll), df=1, lower.tail = FALSE), 2) < .05))/nrow(m2_split_d) # .20
+# frl + d with different learning rates 
+r1 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__7906.csv")) 
+r2 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__8529.csv")) 
+r3 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__3722.csv")) 
+m12_diff_etas <- GetBestFit(rbind(r1, r2, r3))
+m12_diff_etas <- AddBICAndAIC(m12_diff_etas, fp_full=4)
+m12_diff_etas["model"] <- "fRL+d+diff. LRs"
+length(which(round(pchisq(2*(-m12_diff_etas$nll - -m2$nll), df=1, lower.tail = FALSE), 2) < .05))/nrow(m2_split_d) # .76 (**majority**)
+# fRL + d splitting on eta neg  
+r1 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__6847_split_on_eta_neg.csv"))
+r2 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__2360_split_on_eta_neg.csv"))
+r3 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__7260_split_on_eta_neg.csv"))
+r4 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__8700_split_on_eta_neg.csv"))
+m12_diff_etas_split_neg <- GetBestFit(rbind(r1, r2, r3, r4))
+m12_diff_etas_split_neg <- AddBICAndAIC(m12_diff_etas_split_neg, fp_full=3, fp_split=1)
+m12_diff_etas_split_neg["model"] <- "fRL+d+diff. LRs+split -PE LR"
+length(which(round(pchisq(2*(-m12_diff_etas_split_neg$nll - -m12_diff_etas$nll), df=1, lower.tail = FALSE), 2) < .05))/nrow(m2_split_d) # .29
+# fRL + d splitting on eta pos 
+r1 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__6507_split_on_eta_pos.csv"))
+r2 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__9611_split_on_eta_pos.csv"))
+r3 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__6106_split_on_eta_pos.csv"))
+r4 <- read.csv(paste0(model_path, "m_12_beta_d_eta_pos_eta_neg__5304_split_on_eta_pos.csv"))
+m12_diff_etas_split_pos <- GetBestFit(rbind(r1, r2, r3, r4))
+m12_diff_etas_split_pos <- AddBICAndAIC(m12_diff_etas_split_pos, fp_full=3, fp_split=1)
+m12_diff_etas_split_pos["model"] <- "fRL+d+diff LRs+split +PE LR"
+length(which(round(pchisq(2*(-m12_diff_etas_split_pos$nll - -m12_diff_etas$nll), df=1, lower.tail = FALSE), 2) < .05))/nrow(m2_split_d) # .29
+```
+
+
+```{r}
+PrintNestedModelBICSumms(m2, m1)
+```
+
+### BIC t-tests 
+
+```{r}
+# No sign. improvement from splitting beta 
+mean(m2_split_beta$bic - m2$bic)
+t.test(m2_split_beta$bic, m2$bic, paired=TRUE)
+
+# Simpler model is (not signif) better 
+mean(m2_split_eta$bic - m2$bic)
+t.test(m2_split_eta$bic, m2$bic, paired=TRUE)
+
+# Simpler model is (signif) better 
+mean(m2_split_d$bic - m2$bic)
+t.test(m2_split_d$bic, m2$bic, paired=TRUE)
+```
+
+
+```{r}
+m2$bic; cat('\n \n')
+m12_diff_etas$bic; cat('\n \n')
+m12_diff_etas$bic-m2$bic
+
+# Significant improvement of diff etas > m2 
+hist(m12_diff_etas$bic- m2$bic, breaks=30)
+t.test(m12_diff_etas$bic, m2$bic, paired=TRUE)
+```
+
+
+```{r}
+# Significant improvement of diff etas wo split > split on neg 
+hist(m12_diff_etas_split_neg$bic- m12_diff_etas$bic, breaks=30)
+mean(m12_diff_etas_split_neg$bic- m12_diff_etas$bic, breaks=30)
+t.test(m12_diff_etas_split_neg$bic, m12_diff_etas$bic, paired=TRUE)
+
+# No significant improvement by diff etas split pos 
+hist(m12_diff_etas_split_pos$bic- m12_diff_etas$bic, breaks=30)
+mean(m12_diff_etas_split_pos$bic- m12_diff_etas$bic, breaks=30)
+t.test(m12_diff_etas_split_pos$bic, m12_diff_etas$bic, paired=TRUE)
+```
+
+```{r}
+long_form_bic <- 
+  bind_rows(#m1 %>% select(ID, model) %>% mutate(delta_bic=0), 
+            m2 %>% select(ID, model, bic) %>% mutate(delta_bic=0),
+            m2_split_beta %>% select(ID, model, bic) %>% mutate(delta_bic=.$bic-m2$bic) %>% select(-c(bic)),
+            m2_split_eta %>% select(ID, model, bic) %>% mutate(delta_bic=.$bic-m2$bic) %>% select(-c(bic)),
+            m2_split_d %>% select(ID, model, bic) %>% mutate(delta_bic=.$bic-m2$bic) %>% select(-c(bic)),
+            m12_diff_etas %>% select(ID, model, bic) %>% mutate(delta_bic=.$bic-m2$bic) %>% select(-c(bic)),
+            m12_diff_etas_split_neg %>% select(ID, model, bic) %>% mutate(delta_bic=.$bic-m2$bic) %>% select(-c(bic)),
+            m12_diff_etas_split_pos %>% select(ID, model, bic) %>% mutate(delta_bic=.$bic-m2$bic) %>% select(-c(bic)))
+```
+
+```{r}
+long_form_bic$model <- factor(long_form_bic$model, levels=c(
+                                        "fRL+d", 
+                                        "fRL+d+split inv. temp.",
+                                        "fRL+d+split LR", 
+                                        "fRL+split d", 
+                                        "fRL+d+diff. LRs",
+                                        "fRL+d+diff. LRs+split -PE LR", 
+                                        "fRL+d+diff LRs+split +PE LR"))
+long_form_bic$mi <- as.integer(long_form_bic$model)
+plot_lfb <- long_form_bic[!long_form_bic$mi < 2, ]
+```
+
+```{r}
+delta_bic_summ <- long_form_bic %>% group_by(model) %>% summarize(m_delta_bic=mean(delta_bic))
+```
+
+```{r}
+a <- ggplot(plot_lfb, aes(x=model, y=delta_bic, fill=model)) + 
+  geom_bar(stat="summary", color="black", alpha=.8) +
+  geom_jitter(width=.18, 
+              aes(fill=as.factor(ID)), alpha=.6, size=3, fill="gray57", pch=21, color="black") + 
+  tol + ga + ap + 
+  xlab("") + ylab(TeX('$\\Delta\ BIC$')) +
+  theme(axis.text.x = element_text(angle=30, hjust=1, size=13))
+
+a
+```
+
+```{r}
+mean(m2$bic)
+mean(m12_diff_etas$bic)
+t.test(m12_diff_etas$bic, m2$bic, paired=TRUE)
+```
+
+
+```{r}
+m12_diff_etas %>% summarize(mean(eta_pos), sd(eta_pos), mean(eta_neg), sd(eta_neg))
+```
+```{r}
+t.test(m12_diff_etas$eta_neg, m12_diff_etas$eta_pos, paired=TRUE)
+```
+
+
+Summaries  
+```{r}
+m12_diff_etas %>% 
+  summarize(mean(d), sd(d), mean(beta), sd(beta), mean(eta_pos), sd(eta_pos), mean(eta_neg), sd(eta_neg))
+```
+
+# Parameter recovery plots  
+
+```{r}
+PullAllFiles <- function(model_string) {
+  ### Pull and bind up all the par recovery files for this model ###
+  lapply(grep(model_string, list.files("./../../model_res/par_rec_res/")), function(x) {
+    file <- read.csv(paste0("./../../model_res/par_rec_res/", list.files("./../../model_res/par_rec_res/")[x]))
+  }) %>% bind_rows()
+}
+```
+
+Prep par recovery dfs  
+```{r}
+# The optimizer sometimes got stuck at local minima. Since I optimize on the emp df using multiple starting points and dropping premature terminations, my par recovery routine was meant to mimic this by dropping recoveries with chance likelihood (within an epsilon of -log(1/3)*1320), however these were retained in the files. Thus, here I delete recoveries at chance likelihood, suggesting the optimizer got stuck at a local minimum. I'm also just taking the first 100 rows of each for standardization. 
+m12_tmp <- PullAllFiles("m_12")
+m12pr <- m12_tmp[-c(which(m12_tmp$value > 1448)), ] %>% slice(1:100)
+m2_tmp <- PullAllFiles("m_2")
+m2 <- m2_tmp[-c(which(m2_tmp$value > 1448)), ] %>% slice(1:100)
+m2 <- m2[1:100, ]
+```
+
+```{r}
+PlotSimVsRecov <- function(pr_df) {
+  ### Return lists of plots of simulated vs recovered values for all plots in df ###
+  par_names <- unlist(map(strsplit(names(pr_df)[grep("opt", names(pr_df))], "_o"), 1))
+  plot_list <- lapply(par_names, function(x) {
+    single_par_df <- na.omit(setNames(data.frame(pr_df %>% select(paste0(x, "_sim")),
+                                                 pr_df %>% select(paste0(x, "_opt"))), 
+                                      c("Simulated", "Recovered")))
+    # Add exact copy of sim'ed to draw a line through to create identity line
+    single_par_df$y_sim <- single_par_df$Simulated
+    r_value <- round(cor(single_par_df[, 1], single_par_df[, 2]), 3)
+    
+    tmp_p <- ggplot(single_par_df, aes(x=Simulated, y=Recovered)) + 
+      #geom_point(size=4, alpha=.9, pch=21, fill=sample(rainbow(100), 1)) + 
+      geom_line(aes(x=Simulated, y=y_sim), size=1.5) +
+      geom_point(size=4, alpha=.6, pch=21, fill="grey57") +
+      #ggtitle(paste0(paste0(toupper(substr(x, 1, 1)), 
+      #                substr(x, 2, nchar(x[1]))), 
+      #               ": corr = ", r_value)) + 
+      #geom_smooth(method="lm", color="black") +
+      xlab("simulated") + ylab("recovered") +
+      ga + ap + tp
+    # r_str <- toString(r_value)
+    tp <- bquote(eta)
+    r_str <- toString(r_value)
+    if (x == "eta") tmp_p <- tmp_p + ggtitle(paste("LR",  " : r = ", r_value))
+    # + ggtitle(substitute(paste(eta,  " : r = ", r_value)))
+    if (x == "eta_pos") tmp_p <- tmp_p + ggtitle(paste0("+PE LR",  ": r = ", r_value))
+    if (x == "eta_neg") tmp_p <- tmp_p + ggtitle(paste0("-PE LR",  ": r = ", r_value))
+    if (x == "beta") tmp_p <- tmp_p + ggtitle(paste0(" inverse temp.",  ": r = ", r_value))
+    if (x == "d") tmp_p <- tmp_p + ggtitle(paste0("decay rate",  ": r = ", r_value))
+    # if (x == "eta_pos") tmp_p <- tmp_p + ggtitle(substitute(paste(eta,  "+ : r = ", r_value)))
+    # if (x == "eta_neg") tmp_p <- tmp_p + ggtitle(substitute(paste(eta,  "- : r = ", r_value)))
+    # if (x == "beta") tmp_p <- tmp_p + ggtitle(substitute(paste(beta,  " : r = ", r_value)))
+    # if (x == "d") tmp_p <- tmp_p + ggtitle(substitute(paste(d,  " : r = ", r_value)))
+    # #if (x == "d") tmp_p <- tmp_p + ggtitle(substitute(paste(d,  " : r = ", r_value)))
+    # if (x == "attn_beta") tmp_p <- tmp_p + ggtitle(substitute(paste(beta^A,  " : r = ", r_value)))
+    tmp_p    
+  }
+  )
+plot_list
+}
+#sbs <- theme(plot.subtitle = element_text(size=20, hjust=4))
+```
+
+```{r}
+m2s <- PlotSimVsRecov(m2) 
+#a <- 
+  (m2s[[1]] | m2s[[2]] | m2s[[3]]) +
+  plot_annotation(
+    title = 'A feature Reinforcement Learning + decay (fRL + d)'
+  )
+#a
+```
+
+```{r}
+m12s <- PlotSimVsRecov(m12pr)
+b <- 
+  (m12s[[1]]+ labs(subtitle="B") | m12s[[2]]) / (
+  (m12s[[3]] | m12s[[4]] )) 
+  # ) + 
+  # plot_annotation(
+  #   title = 'B fRL + d, different learning rates'
+  # )
+b
+```
+
+Simulation plots  
+
+```{r}
+m2_sims <- read.csv("./../../model_res/sim_outs/10iter_sim_res_m2_beta_eta_d.csv")
+m2_sims["model"] <- "fRL + d (simulated)"
+m12_sims <- read.csv("./../../model_res/sim_outs/10iter_sim_res_m12_beta_d_eta_pos_eta_neg.csv")
+m12_sims["model"] <- "fRL + d with diff. LRs (simulated)"
+# m14_sims <- read.csv("./../model_res/sim_outs/10iter_sim_res_m14_beta_d_eta_pos_eta_neg_attn_beta.csv")
+# m14_sims["model"] <- "fRL + d + AB - diff LRs"
+all_sims <- rbind(m2_sims, m12_sims)
+```
+
+```{r}
+emp_perf_summ <- bx_df %>% 
+  group_by(trial) %>% summarize(m=mean(correct), N=n(), se=sd(correct)/sqrt(n()), n())
+```
+
+```{r}
+sims_summ <- all_sims  %>% 
+  group_by(model, trial) %>% summarize(m=mean(sim_correct), N=n(), se=sd(sim_correct)/sqrt(n()), n())
+```
+
+```{r}
+# ggplot(sims_summ %>% filter(model=="fRL + d"), aes(x=trial, y=m, fill=as.factor(model))) + geom_point()
+# sims_summ %>% filter(model=="f + d")
+c <- ggplot(emp_perf_summ, aes(x=trial, y=m)) +
+    geom_ribbon(aes(ymin=m-se, ymax=m+se), fill='gray57', alpha=.9) +
+    geom_line(size=1) +
+    geom_point(data=sims_summ, 
+               aes(x=trial, y=m, fill=as.factor(model)), size=4, pch=21, alpha=.6, color="black", inherit.aes = FALSE) +
+    ga + ap + 
+    ylab('proportion correct') +
+    ylim(.25, .8) +
+    chance_gg + 
+    theme(legend.text = element_text(size = 20),
+               legend.title = element_blank(),
+               legend.key.size = unit(2, 'lines'),
+          legend.position = c(.3, .9))
+```
+
+```{r}
+c
+```
+
+```{r, height=20}
+model_fig <- a / b / c + plot_annotation(tag_levels = 'A')
+model_fig
+# ggsave("HitchcockFig3_wronglettering228.pdf", dpi=2000, plot=model_fig, height=18, width=12, path="./../../paper/figs/")
+```
+
+
+
+## Parameter results  
+
+Confirming no diff
+```{r}
+hist(m2_split_d$d_NEU, breaks=30)
+hist(m2_split_d$d_RUM, breaks=30)
+```
+```{r}
+m2_split_d %>% 
+  summarize(mean(d_NEU), sd(d_NEU), mean(d_RUM), sd(d_RUM))
+t.test(m2_split_d$d_NEU, m2_split_d$d_RUM, paired=TRUE)
+1/ttestBF(m2_split_d$d_NEU, m2_split_d$d_RUM, paired=TRUE)
+
+m2_split_d %>% 
+  summarize(mean(d_NEU), sd(d_NEU), mean(d_RUM), sd(d_RUM))
+```
+
+```{r}
+hist(m12_diff_etas_split_neg$eta_neg_RUM, breaks=30)
+hist(m12_diff_etas_split_neg$eta_neg_NEU, breaks=30)
+```
+
+```{r}
+m12_diff_etas_split_neg %>% 
+  summarize(mean(eta_neg_RUM), sd(eta_neg_RUM), mean(eta_neg_NEU), sd(eta_neg_NEU))
+t.test(m12_diff_etas_split_neg$eta_neg_NEU, m12_diff_etas_split_neg$eta_neg_RUM, paired=TRUE)
+1/ttestBF(m12_diff_etas_split_neg$eta_neg_NEU, m12_diff_etas_split_neg$eta_neg_RUM, paired=TRUE)
+m12_diff_etas_split_neg %>% 
+  summarize(mean(eta_neg_NEU), sd(eta_neg_NEU), mean(eta_neg_RUM), sd(eta_neg_RUM))
+```
+
+Figure relating decay to trait rumination  
+
+```{r}
+perf_sums <- bx_df %>% group_by(ID) %>% summarize(pcor=mean(correct))
+```
+
+```{r}
+AddRumBDI <- function(model) {
+  ### Add ruminationand BDI score to model results ###
+  if (all(model$ID == rrs_bdi$ID) & (all(rrs_bdi$ID == perf_sums$ID))) {
+  model_comb <- rrs_bdi %>% select(c(rrs_refl_z,
+                                   rrs_brood_z,
+                                   rrs_sum_z,
+                                   bdi_sum_z, 
+                                   # Also get the non z-scored variants for when these are
+                                   # outcome vars 
+                                   rrs_reflect_sum,
+                                   rrs_brood_sum,
+                                   rrs_sum,
+                                   bdi_sum)) %>% bind_cols(model) %>% 
+                                   # Add overall performance  
+                                   bind_cols(perf_sums["pcor"])
+  }
+model_comb
+}
+```
+
+
+```{r}
+# m12 diff etas is best fitting model  
+m12 <- AddRumBDI(m12_diff_etas)
+m12[c("z_d", "z_eta_pos", "z_eta_neg", "z_beta")] <- 
+  data.frame(ZScore(m12$d), ZScore(m12$eta_pos), ZScore(m12$eta_neg), ZScore(m12$beta))
+```
+
+```{r}
+cor.test(m12$rrs_sum_z, m12$d)
+```
+
+```{r}
+d <- ggplot(m12, aes(x=rrs_sum, y=d)) + 
+  geom_smooth(color="black", method="lm", size=3, se=FALSE) + 
+  geom_point(size=6, color="black", fill="gray57", pch=21) + 
+  ga + ap + ylab("decay rate") + xlab("trait rumination") + 
+  theme(axis.text.x = element_text(hjust=0)) +
+  ylim(.2, .68) +
+  ggtitle("r = .38") + tp
+d
+```
+
+```{r}
+#ggsave("HitchcockFig4_22820.pdf", dpi=2000, plot=d, height=6, width=12, path="./../../paper/figs/")
+```
+
+
+Decay predicts trait rumination.  
+```{r}
+m12_lm <- lm(rrs_sum ~ z_eta_pos + z_eta_neg + z_d + z_beta, data=m12)
+summary(m12_lm)
+```
+Holds wo other params  
+```{r}
+m12_lm_nocv <- lm(rrs_sum ~ z_d, data=m12)
+summary(m12_lm_nocv)
+```
+
+```{r}
+r1 <- read.csv(paste0(model_path, "m_2_beta_eta_d__1009.csv"))
+r2 <- read.csv(paste0(model_path, "m_2_beta_eta_d__9380.csv"))
+m2 <- GetBestFit(rbind(r1, r2))
+m2 <- AddBICAndAIC(m2, fp_full=3) # beta, eta, d
+m2_plus <- AddRumBDI(m2)
+m2_plus[c("z_d", "z_eta", "z_beta")] <- 
+  data.frame(ZScore(m2_plus$d), ZScore(m2_plus$eta), ZScore(m2_plus$beta))
+```
+
+Same effect present in fRL+d  
+```{r}
+m2_lm <- lm(rrs_sum ~ z_eta + z_d + z_beta, data=m2_plus)
+summary(m2_lm)
+```
+
+```{r}
+m2_lm_nocv <- lm(rrs_sum ~ z_d , data=m2_plus)
+summary(m2_lm_nocv)
+```
+Breaking the RRS into its two components, d marginally associated with higher reflection but not brooding scores.  
+
+```{r}
+summary(lm(rrs_brood_sum ~ z_eta_pos + z_eta_neg + z_beta + z_d , data=m12))
+summary(lm(rrs_reflect_sum ~ z_eta_pos + z_eta_neg + z_d + z_beta, data=m12))
+```
+
+
+In a model without the effects of bdi and rrs yet, decay predicts performance in fRL+d with and without different learning rates. 
+
+```{r}
+summary(lm(pcor ~ z_beta + z_eta + z_d, data=m2_plus))
+```
+
+
+```{r}
+summary(lm(pcor ~ z_eta_pos + z_beta + z_eta_neg + z_d, data=m12))
+```
+
+The positive effect of decay on performance obtains when including depression and rumination as covariates.  
+
+```{r}
+summary(lm(pcor ~ z_eta_pos + z_beta + z_eta_neg + z_d + bdi_sum_z + rrs_sum_z, data=m12))
+summary(lm(pcor ~ z_eta + z_beta + z_d + bdi_sum_z + rrs_sum_z, data=m2_plus))
+```
+
+VIF look okay although eta pos and beta are a little collinear as you'd expect.    
+```{r}
+car::vif(m12_lm)
+```
+
